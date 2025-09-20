@@ -1,0 +1,46 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.log
+
+# --- Virtualenv / build ---
+.venv/
+.venv-infer/
+env/
+venv/
+build/
+dist/
+*.egg-info/
+
+# --- OS / Editors ---
+.DS_Store
+.vscode/
+.idea/
+
+
+# --- Media outputs ---
+*.mp4
+*.avi
+*.mov
+*.m4v
+*.png
+*.jpg
+*.jpeg
+
+# --- Local data / tmp ---
+tmp/
+*.tmp
+*.temp
+*.lock
+
+# --- PyTest / coverage ---
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# --- Docker ---
+*.env

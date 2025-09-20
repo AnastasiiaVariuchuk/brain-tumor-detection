@@ -1,0 +1,20 @@
+# --- Core ---
+numpy==2.0.2
+pillow==11.3.0
+
+# --- Visualization / plotting ---
+matplotlib==3.9.2
+
+# --- Computer vision ---
+opencv-python-headless==4.10.0.84
+# Якщо потрібне GUI-вікно (imshow) → заміни на opencv-python
+
+# --- Roboflow & Inference ---
+roboflow==1.2.9
+inference-sdk==0.56.0
+supervision==0.26.1
+
+# --- Streamlit app ---
+streamlit==1.40.0
+pandas==2.2.3
+altair==5.3.0
