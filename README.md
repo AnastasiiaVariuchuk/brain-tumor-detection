@@ -10,7 +10,7 @@ docker run --rm -p 8502:8501 \
   -e ROBOFLOW_API_KEY="162uSH7JuhRNxACBn73k" \
   tumor-app:latest
 
-# S=With Streamlit only 
+# With Streamlit only 
 
 streamlit run app.py \
   --server.enableXsrfProtection=false \
