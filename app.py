@@ -28,6 +28,8 @@ with st.sidebar:
         conf = st.slider("Confidence (%)", 0, 100, 40, 1)
         overlap = st.slider("Overlap (%)", 0, 100, 30, 1)
         display_width = st.slider("Display width (px)", 256, 1024, 768, 16)
+        keep_k = st.slider("Keep top-K boxes", 1, 10, 1, 1)
+        drop_tiny = st.checkbox("Drop tiny boxes (<0.5% of image area)", value=True)
     else:
         st.subheader("Classification model")
         project_slug_cls = st.text_input("Project slug (cls)", value="brain-tumor-of8ow")
@@ -56,11 +58,19 @@ def run_inference_det(model, image_path, confidence, overlap):
     """Run detection prediction and return JSON."""
     return model.predict(image_path, confidence=confidence, overlap=overlap).json()
 
-def detections_from_preds(preds, img_w, img_h):
+def normalize_if_needed(x, y, w, h, img_w, img_h):
+    """If values look normalized (<=2), upscale to pixels."""
+    if w <= 2.0 and h <= 2.0:
+        x *= img_w
+        y *= img_h
+        w *= img_w
+        h *= img_h
+    return x, y, w, h
+
+def preds_to_detections(preds, img_w, img_h):
     """
-    Convert Roboflow predictions (center x,y + width,height) to supervision.Detections
-    in the SAME pixel space as the image we draw on.
-    Auto-upscale if the API ever returns normalized coords (0..1).
+    Convert predictions (center x,y,width,height in pixels or normalized)
+    to supervision.Detections in the displayed image pixel space.
     """
     if not preds:
         return sv.Detections.empty(), {}
@@ -70,17 +80,8 @@ def detections_from_preds(preds, img_w, img_h):
 
     xyxy, conf, cls = [], [], []
     for p in preds:
-        x = float(p["x"])
-        y = float(p["y"])
-        w = float(p["width"])
-        h = float(p["height"])
-
-        # If values look normalized, upscale to pixels
-        if w <= 2.0 and h <= 2.0:
-            x *= img_w
-            y *= img_h
-            w *= img_w
-            h *= img_h
+        x, y, w, h = float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])
+        x, y, w, h = normalize_if_needed(x, y, w, h, img_w, img_h)
 
         x1, y1 = max(0.0, x - w / 2), max(0.0, y - h / 2)
         x2, y2 = min(float(img_w), x + w / 2), min(float(img_h), y + h / 2)
@@ -130,22 +131,38 @@ if uploaded and api_key:
                 confidence=conf / 100.0,
                 overlap=overlap / 100.0
             )
-            preds = result.get("predictions", [])
+            raw_preds = result.get("predictions", [])
 
-            # Always use the displayed image size (avoid meta mismatches)
+            # Optional tiny-box filter BEFORE any further processing
             img_h, img_w = rgb.shape[:2]
-            detections, _ = detections_from_preds(preds, img_w, img_h)
+            img_area = float(img_w * img_h)
+            preds = []
+            for p in raw_preds:
+                x, y, w, h = float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])
+                x, y, w, h = normalize_if_needed(x, y, w, h, img_w, img_h)
+                if drop_tiny and (w * h) / img_area < 0.005:
+                    continue
+                preds.append(dict(p, x=x, y=y, width=w, height=h))
+
+            # Sort by confidence (desc) and keep top-K for stability
+            preds.sort(key=lambda p: p.get("confidence", 0.0), reverse=True)
+            preds = preds[:keep_k] if keep_k > 0 else preds
+
+            # Convert to detections in the space of the image we draw on
+            detections, _ = preds_to_detections(preds, img_w, img_h)
             classes = sorted(set(p.get("class", "object") for p in preds))
 
             st.success(f"Objects detected: {len(detections)}")
             st.caption(f"Classes: {classes or '—'}")
 
+            # Class filter (applied to both preds and detections)
             selected = st.multiselect("Filter by classes", options=classes, default=classes)
             if selected and preds:
-                mask = np.array([p.get("class", "object") in selected for p in preds])
-                detections = detections[mask]
-                preds = [p for p, keep in zip(preds, mask) if keep]
+                keep_mask = np.array([p.get("class", "object") in selected for p in preds])
+                detections = detections[keep_mask]
+                preds = [p for p, keep in zip(preds, keep_mask) if keep]
 
+            # Render
             rgb_disp, det_disp, disp_w, disp_h = resize_and_rescale(rgb, detections, display_width)
             labels = [f"{p.get('class','object')} {p.get('confidence',0)*100:.0f}%" for p in preds]
             annotated = sv.BoxAnnotator().annotate(scene=rgb_disp.copy(), detections=det_disp)
@@ -194,10 +211,9 @@ if uploaded and api_key:
                 # Full table
                 st.dataframe(df, use_container_width=True)
 
-                # ----- Robust Altair chart (avoids readonly-property error) -----
+                # Robust Altair chart via values (avoids readonly-property errors)
                 if "class" in df and "confidence_%" in df:
                     chart_df = df[["class", "confidence_%"]].copy()
-                    # Cast to plain Python types
                     chart_df["class"] = chart_df["class"].astype(str)
                     chart_df["confidence_%"] = chart_df["confidence_%"].astype(float)
                     values = chart_df.to_dict(orient="records")
@@ -205,42 +221,25 @@ if uploaded and api_key:
 
                     base = alt.Chart(alt.Data(values=values)).encode(
                         y=alt.Y("class:N", sort="-x", title="Class"),
-                        x=alt.X(
-                            "confidence_%:Q",
-                            title="Confidence (%)",
-                            scale=alt.Scale(domain=[0, 100])
-                        ),
-                        tooltip=[
-                            alt.Tooltip("class:N", title="Class"),
-                            alt.Tooltip("confidence_%:Q", title="Confidence (%)", format=".1f")
-                        ],
+                        x=alt.X("confidence_%:Q",
+                                title="Confidence (%)",
+                                scale=alt.Scale(domain=[0, 100])),
+                        tooltip=[alt.Tooltip("class:N", title="Class"),
+                                 alt.Tooltip("confidence_%:Q", title="Confidence (%)", format=".1f")],
                     )
 
-                    bars = base.mark_bar(
-                        cornerRadiusTopRight=6,
-                        cornerRadiusBottomRight=6,
-                        opacity=0.9
-                    )
+                    bars = base.mark_bar(cornerRadiusTopRight=6,
+                                         cornerRadiusBottomRight=6,
+                                         opacity=0.9)
+                    labels = base.mark_text(align="left", dx=5, fontWeight="bold")\
+                                 .encode(text=alt.Text("confidence_%:Q", format=".1f"))
 
-                    labels = base.mark_text(
-                        align="left",
-                        dx=5,
-                        fontWeight="bold"
-                    ).encode(text=alt.Text("confidence_%:Q", format=".1f"))
-
-                    layered = (bars + labels).properties(
-                        height=auto_height
-                    ).configure_axis(
-                        grid=True,
-                        gridOpacity=0.15,
-                        labelFontSize=12,
-                        titleFontSize=13
-                    ).configure_view(
-                        strokeOpacity=0
-                    )
+                    layered = (bars + labels).properties(height=auto_height)\
+                                             .configure_axis(grid=True, gridOpacity=0.15,
+                                                             labelFontSize=12, titleFontSize=13)\
+                                             .configure_view(strokeOpacity=0)
 
                     st.altair_chart(layered, use_container_width=True)
-                # ----------------------------------------------------------------
 
             with st.expander("Raw JSON"):
                 st.code(json.dumps(result, indent=2), language="json")
