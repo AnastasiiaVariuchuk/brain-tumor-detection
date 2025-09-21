@@ -1,91 +1,70 @@
 import os
-import io
 import json
 import tempfile
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
 import streamlit as st
+import altair as alt
 
 from roboflow import Roboflow
 import supervision as sv
 
 # ---------------- UI ----------------
-st.set_page_config(page_title="Brain Tumor Detection", layout="centered")
-
-st.title("🧠 Brain Tumor Detection")
-st.caption("Upload an MRI image → get bounding boxes, classes, and model confidence.")
+st.set_page_config(page_title="Brain Tumor App (Detection & Classification)", layout="centered")
+st.title("🧠 Brain Tumor App — Detection & Classification")
 
 with st.sidebar:
     st.header("⚙️ Settings")
     api_key = "162uSH7JuhRNxACBn73k"
-    workspace = ""
-    project_slug = st.text_input("Project slug", value="brain-tumor-detection-glu2s")
-    version = st.number_input("Version", min_value=1, value=1, step=1)
+    workspace = ""  
 
-    conf = st.slider("Confidence (%)", 0, 100, 40, 1)
-    overlap = st.slider("Overlap (%)", 0, 100, 30, 1)
-    display_width = st.slider("Display width (px)", 256, 1024, 768, 16,
-                              help="Image is resized for display; boxes are rescaled accordingly.")
+    task = st.radio("Task", ["Detection", "Classification"], horizontal=True)
+
+    if task == "Detection":
+        st.subheader("Detection model")
+        project_slug_det = st.text_input("Project slug (det)", value="brain-tumor-detection-glu2s")
+        version_det = st.number_input("Version (det)", min_value=1, value=1, step=1)
+        conf = st.slider("Confidence (%)", 0, 100, 40, 1)
+        overlap = st.slider("Overlap (%)", 0, 100, 30, 1)
+        display_width = st.slider("Display width (px)", 256, 1024, 768, 16)
+    else:
+        st.subheader("Classification model")
+        project_slug_cls = st.text_input("Project slug (cls)", value="brain-tumor-of8ow")
+        version_cls = st.number_input("Version (cls)", min_value=1, value=1, step=1)
 
 uploaded = st.file_uploader("📤 Upload image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
 # ---------------- Helpers ----------------
 def load_image_to_rgb(file) -> np.ndarray:
-    # Respect phone/EXIF rotations
     img = ImageOps.exif_transpose(Image.open(file)).convert("RGB")
     return np.array(img)
 
 def save_rgb_image(arr: np.ndarray, path: str):
     Image.fromarray(arr).save(path)
 
-def maybe_denormalize_preds(preds, img_w, img_h):
-    """
-    Roboflow usually returns absolute pixels, але перестрахуємось:
-    якщо значення виглядають нормалізованими (<=2), домножимо на розмір зображення.
-    """
+def rf_model(api_key: str, workspace: str, project_slug: str, version: int):
+    rf = Roboflow(api_key=api_key)
+    ws = rf.workspace(workspace) if workspace else rf.workspace()
+    project = ws.project(project_slug)
+    return project.version(int(version)).model
+
+def run_inference_det(model, image_path, confidence, overlap):
+    return model.predict(image_path, confidence=confidence, overlap=overlap).json()
+
+def detections_from_preds(preds, img_w, img_h):
     if not preds:
-        return preds
-    max_x = max(p.get("x", 0) for p in preds)
-    max_w = max(p.get("width", 0) for p in preds)
-    # якщо дуже маленькі числа — вважаємо нормалізованими
-    if max_x <= 2.0 and max_w <= 2.0:
-        for p in preds:
-            p["x"] *= img_w
-            p["y"] *= img_h
-            p["width"]  *= img_w
-            p["height"] *= img_h
-    return preds
-
-def preds_to_detections(preds, img_w, img_h):
-    """
-    Явно формуємо xyxy для supervision.Detections:
-      Roboflow: x,y — центр; width,height — розміри (у пікселях після денормалізації).
-    """
-    if not preds:
-        return sv.Detections.empty()
-
-    # Безпека: денормалізувати за потреби
-    preds = maybe_denormalize_preds(preds, img_w, img_h)
-
-    xyxy = []
-    conf = []
-    cls  = []
+        return sv.Detections.empty(), {}
     classes = [p.get("class", "object") for p in preds]
-    # map class name -> id (стабільно для нинішнього запиту)
-    name_to_id = {name: i for i, name in enumerate(sorted(set(classes)))}
-
+    name_to_id = {n: i for i, n in enumerate(sorted(set(classes)))}
+    xyxy, conf, cls = [], [], []
     for p in preds:
-        x, y = float(p["x"]), float(p["y"])
-        w, h = float(p["width"]), float(p["height"])
-        x1 = max(0.0, x - w / 2.0)
-        y1 = max(0.0, y - h / 2.0)
-        x2 = min(float(img_w), x + w / 2.0)
-        y2 = min(float(img_h), y + h / 2.0)
+        x, y, w, h = float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])
+        x1, y1 = max(0.0, x - w/2), max(0.0, y - h/2)
+        x2, y2 = min(float(img_w), x + w/2), min(float(img_h), y + h/2)
         xyxy.append([x1, y1, x2, y2])
         conf.append(float(p.get("confidence", 0.0)))
         cls.append(name_to_id[p.get("class", "object")])
-
     return sv.Detections(
         xyxy=np.array(xyxy, dtype=np.float32),
         confidence=np.array(conf, dtype=np.float32),
@@ -93,104 +72,113 @@ def preds_to_detections(preds, img_w, img_h):
     ), name_to_id
 
 def resize_and_rescale(rgb: np.ndarray, detections: sv.Detections, target_w: int):
-    """Resize image to target_w (keep aspect) and scale detections to match."""
     h, w, _ = rgb.shape
     if target_w >= w:
-        return rgb, detections, w, h  # do not upscale; coordinates already match
+        return rgb, detections, w, h
     scale = target_w / float(w)
     target_h = int(round(h * scale))
     rgb_resized = np.array(Image.fromarray(rgb).resize((target_w, target_h), Image.BILINEAR))
-    detections_scaled = detections.scale((scale, scale))
-    return rgb_resized, detections_scaled, target_w, target_h
+    return rgb_resized, detections.scale((scale, scale)), target_w, target_h
 
-def run_inference(model, image_path, confidence, overlap):
-    """Run inference and show detailed errors if any."""
-    try:
-        return model.predict(image_path, confidence=confidence, overlap=overlap).json()
-    except Exception as e:
-        status = None
-        body = None
-        resp = getattr(e, "response", None)
-        if resp is not None:
-            status = getattr(resp, "status_code", None)
-            try:
-                body = resp.text
-            except Exception:
-                body = "<no text>"
-        st.error(f"❌ Roboflow request failed. Status: {status}. Error: {e}")
-        if body:
-            st.code(body, language="json")
-        raise
+def run_inference_cls(model, image_path):
+    return model.predict(image_path).json()
 
 # ---------------- Main ----------------
-if uploaded and api_key and project_slug:
+if uploaded and api_key:
     try:
-        # 1) Save temp file for predict()
         rgb = load_image_to_rgb(uploaded)
+
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
             save_rgb_image(rgb, tmp_path)
 
-        # 2) Load model
-        st.write("⏳ Loading Roboflow model…")
-        rf = Roboflow(api_key=api_key)
-        ws = rf.workspace(workspace) if workspace else rf.workspace()
-        project = ws.project(project_slug)
-        model = project.version(int(version)).model
+        if task == "Detection":
+            st.write("⏳ Loading detection model…")
+            model = rf_model(api_key, workspace, project_slug_det, version_det)
 
-        # 3) Inference
-        st.write("🚀 Running inference…")
-        result = run_inference(model, tmp_path, conf, overlap)
-        preds = result.get("predictions", [])
-        img_meta_w = result.get("image", {}).get("width", rgb.shape[1])
-        img_meta_h = result.get("image", {}).get("height", rgb.shape[0])
+            st.write("🚀 Running detection…")
+            result = run_inference_det(model, tmp_path, conf, overlap)
+            preds = result.get("predictions", [])
+            meta = result.get("image", {})
+            img_w, img_h = meta.get("width", rgb.shape[1]), meta.get("height", rgb.shape[0])
 
-        # 4) Manual, robust conversion to Detections (no shifts)
-        detections, name_to_id = preds_to_detections(preds, img_meta_w, img_meta_h)
-        classes_in_result = sorted(set(p.get("class", "object") for p in preds))
+            detections, _ = detections_from_preds(preds, img_w, img_h)
+            classes = sorted(set(p.get("class","object") for p in preds))
 
-        st.success(f"Objects detected: {len(detections)}")
-        st.write("Classes:", classes_in_result or "—")
+            st.success(f"Objects detected: {len(detections)}")
+            st.caption(f"Classes: {classes or '—'}")
 
-        # 5) Optional class filter
-        selected = st.multiselect("Filter by classes", options=classes_in_result, default=classes_in_result)
-        if selected and preds:
-            mask = np.array([p.get("class", "object") in selected for p in preds])
-            detections = detections[mask]
-            preds = [p for p, keep in zip(preds, mask) if keep]
+            selected = st.multiselect("Filter by classes", options=classes, default=classes)
+            if selected and preds:
+                mask = np.array([p.get("class","object") in selected for p in preds])
+                detections = detections[mask]
+                preds = [p for p, keep in zip(preds, mask) if keep]
 
-        # 6) Resize for display + rescale boxes
-        rgb_disp, det_disp, disp_w, disp_h = resize_and_rescale(rgb, detections, display_width)
+            rgb_disp, det_disp, disp_w, disp_h = resize_and_rescale(rgb, detections, display_width)
+            labels = [f"{p.get('class','object')} {p.get('confidence',0)*100:.0f}%" for p in preds]
+            annotated = sv.BoxAnnotator().annotate(scene=rgb_disp.copy(), detections=det_disp)
+            annotated = sv.LabelAnnotator().annotate(scene=annotated, detections=det_disp, labels=labels)
 
-        # 7) Annotate
-        box_annotator = sv.BoxAnnotator()
-        label_annotator = sv.LabelAnnotator()
-        labels = [f"{p.get('class','object')} {p.get('confidence',0)*100:.0f}%" for p in preds]
+            st.image(annotated, caption=f"Annotated image ({disp_w}×{disp_h})", use_column_width=False, width=disp_w)
 
-        annotated = box_annotator.annotate(scene=rgb_disp.copy(), detections=det_disp)
-        annotated = label_annotator.annotate(scene=annotated, detections=det_disp, labels=labels)
+            if preds:
+                st.dataframe(pd.DataFrame(preds), use_container_width=True)
 
-        # 8) Show exact-size image (no Streamlit auto-resize)
-        st.image(annotated, caption=f"Annotated image ({disp_w}×{disp_h})", use_column_width=False, width=disp_w)
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as out:
+                out_path = out.name
+                save_rgb_image(annotated, out_path)
+            with open(out_path, "rb") as f:
+                st.download_button("⬇️ Download annotated PNG", f, file_name="annotated.png")
 
-        # 9) Table
-        if preds:
-            df = pd.DataFrame(preds)
-            st.dataframe(df, use_container_width=True)
+            with st.expander("Raw JSON"):
+                st.code(json.dumps(result, indent=2), language="json")
 
-        # 10) Download
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as out:
-            out_path = out.name
-            save_rgb_image(annotated, out_path)
-        with open(out_path, "rb") as f:
-            st.download_button("⬇️ Download annotated PNG", f, file_name="annotated.png")
+        else:  # Classification
+            st.write("⏳ Loading classification model…")
+            model = rf_model(api_key, workspace, project_slug_cls, version_cls)
 
-        # 11) Raw JSON
-        with st.expander("📦 Raw JSON response"):
-            st.code(json.dumps(result, indent=2), language="json")
+            st.write("🧪 Running classification…")
+            result = run_inference_cls(model, tmp_path)
+            preds = result.get("predictions", [])
+
+            if not preds:
+                st.warning("No classification result.")
+            else:
+            
+                if isinstance(preds, dict):
+                    preds = [preds]
+
+                df = pd.DataFrame(preds)
+                if "confidence" in df:
+                    df["confidence_%"] = (df["confidence"] * 100).round(1)
+
+                # топ-1
+                top_row = df.iloc[df["confidence"].idxmax()] if "confidence" in df else df.iloc[0]
+                top_label = str(top_row.get("class", "unknown"))
+                top_conf  = float(top_row.get("confidence", 0.0)) * 100
+
+                st.success(f"Top-1: **{top_label}** ({top_conf:.1f}%)")
+                st.dataframe(df, use_container_width=True)
+
+                # бар-чарт
+                if "class" in df and "confidence" in df:
+                    chart = (
+                        alt.Chart(df)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("class:N", sort="-y", title="Class"),
+                            y=alt.Y("confidence:Q", title="Confidence"),
+                            tooltip=["class", alt.Tooltip("confidence", format=".2f")]
+                        )
+                        .properties(height=300)
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+
+            with st.expander("Raw JSON"):
+                st.code(json.dumps(result, indent=2), language="json")
 
     except Exception as e:
-        st.error(f"Execution error: {e}")
+        st.error(f"Error: {e}")
     finally:
         try:
             if 'tmp_path' in locals() and os.path.exists(tmp_path):
@@ -198,4 +186,4 @@ if uploaded and api_key and project_slug:
         except Exception:
             pass
 else:
-    st.info("Please upload an image.")
+    st.info("Upload an image to start.")
