@@ -17,7 +17,7 @@ st.title("🧠 Brain Tumor App — Detection & Classification")
 with st.sidebar:
     st.header("⚙️ Settings")
     api_key = "162uSH7JuhRNxACBn73k"
-    workspace = ""  
+    workspace = ""  # empty => default workspace from API key
 
     task = st.radio("Task", ["Detection", "Classification"], horizontal=True)
 
@@ -37,34 +37,58 @@ uploaded = st.file_uploader("📤 Upload image (PNG/JPG)", type=["png", "jpg", "
 
 # ---------------- Helpers ----------------
 def load_image_to_rgb(file) -> np.ndarray:
+    """Read uploaded image -> RGB numpy array with EXIF orientation fix."""
     img = ImageOps.exif_transpose(Image.open(file)).convert("RGB")
     return np.array(img)
 
 def save_rgb_image(arr: np.ndarray, path: str):
+    """Save RGB numpy array to disk."""
     Image.fromarray(arr).save(path)
 
 def rf_model(api_key: str, workspace: str, project_slug: str, version: int):
+    """Get Roboflow model by project slug and version."""
     rf = Roboflow(api_key=api_key)
     ws = rf.workspace(workspace) if workspace else rf.workspace()
     project = ws.project(project_slug)
     return project.version(int(version)).model
 
 def run_inference_det(model, image_path, confidence, overlap):
+    """Run detection prediction and return JSON."""
     return model.predict(image_path, confidence=confidence, overlap=overlap).json()
 
 def detections_from_preds(preds, img_w, img_h):
+    """
+    Convert Roboflow predictions (center x,y + width,height) to supervision.Detections
+    in the SAME pixel space as the image we draw on.
+    Auto-upscale if the API ever returns normalized coords (0..1).
+    """
     if not preds:
         return sv.Detections.empty(), {}
+
     classes = [p.get("class", "object") for p in preds]
     name_to_id = {n: i for i, n in enumerate(sorted(set(classes)))}
+
     xyxy, conf, cls = [], [], []
     for p in preds:
-        x, y, w, h = float(p["x"]), float(p["y"]), float(p["width"]), float(p["height"])
-        x1, y1 = max(0.0, x - w/2), max(0.0, y - h/2)
-        x2, y2 = min(float(img_w), x + w/2), min(float(img_h), y + h/2)
+        x = float(p["x"])
+        y = float(p["y"])
+        w = float(p["width"])
+        h = float(p["height"])
+
+        # If values look normalized, upscale to pixels
+        if w <= 2.0 and h <= 2.0:
+            x *= img_w
+            y *= img_h
+            w *= img_w
+            h *= img_h
+
+        x1, y1 = max(0.0, x - w / 2), max(0.0, y - h / 2)
+        x2, y2 = min(float(img_w), x + w / 2), min(float(img_h), y + h / 2)
+
         xyxy.append([x1, y1, x2, y2])
         conf.append(float(p.get("confidence", 0.0)))
         cls.append(name_to_id[p.get("class", "object")])
+
     return sv.Detections(
         xyxy=np.array(xyxy, dtype=np.float32),
         confidence=np.array(conf, dtype=np.float32),
@@ -72,6 +96,7 @@ def detections_from_preds(preds, img_w, img_h):
     ), name_to_id
 
 def resize_and_rescale(rgb: np.ndarray, detections: sv.Detections, target_w: int):
+    """Resize image to target width and scale detections accordingly."""
     h, w, _ = rgb.shape
     if target_w >= w:
         return rgb, detections, w, h
@@ -81,6 +106,7 @@ def resize_and_rescale(rgb: np.ndarray, detections: sv.Detections, target_w: int
     return rgb_resized, detections.scale((scale, scale)), target_w, target_h
 
 def run_inference_cls(model, image_path):
+    """Run classification prediction and return JSON."""
     return model.predict(image_path).json()
 
 # ---------------- Main ----------------
@@ -88,6 +114,7 @@ if uploaded and api_key:
     try:
         rgb = load_image_to_rgb(uploaded)
 
+        # Persist image temporarily for the Roboflow SDK call
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
             save_rgb_image(rgb, tmp_path)
@@ -97,20 +124,25 @@ if uploaded and api_key:
             model = rf_model(api_key, workspace, project_slug_det, version_det)
 
             st.write("🚀 Running detection…")
-            result = run_inference_det(model, tmp_path, conf, overlap)
+            # Convert % sliders to 0..1 for the API
+            result = run_inference_det(
+                model, tmp_path,
+                confidence=conf / 100.0,
+                overlap=overlap / 100.0
+            )
             preds = result.get("predictions", [])
-            meta = result.get("image", {})
-            img_w, img_h = meta.get("width", rgb.shape[1]), meta.get("height", rgb.shape[0])
 
+            # Always use the displayed image size (avoid meta mismatches)
+            img_h, img_w = rgb.shape[:2]
             detections, _ = detections_from_preds(preds, img_w, img_h)
-            classes = sorted(set(p.get("class","object") for p in preds))
+            classes = sorted(set(p.get("class", "object") for p in preds))
 
             st.success(f"Objects detected: {len(detections)}")
             st.caption(f"Classes: {classes or '—'}")
 
             selected = st.multiselect("Filter by classes", options=classes, default=classes)
             if selected and preds:
-                mask = np.array([p.get("class","object") in selected for p in preds])
+                mask = np.array([p.get("class", "object") in selected for p in preds])
                 detections = detections[mask]
                 preds = [p for p, keep in zip(preds, mask) if keep]
 
@@ -124,6 +156,7 @@ if uploaded and api_key:
             if preds:
                 st.dataframe(pd.DataFrame(preds), use_container_width=True)
 
+            # Download annotated image
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as out:
                 out_path = out.name
                 save_rgb_image(annotated, out_path)
@@ -144,7 +177,7 @@ if uploaded and api_key:
             if not preds:
                 st.warning("No classification result.")
             else:
-            
+                # Ensure list format
                 if isinstance(preds, dict):
                     preds = [preds]
 
@@ -152,27 +185,62 @@ if uploaded and api_key:
                 if "confidence" in df:
                     df["confidence_%"] = (df["confidence"] * 100).round(1)
 
-                # топ-1
+                # Top-1 prediction
                 top_row = df.iloc[df["confidence"].idxmax()] if "confidence" in df else df.iloc[0]
                 top_label = str(top_row.get("class", "unknown"))
                 top_conf  = float(top_row.get("confidence", 0.0)) * 100
-
                 st.success(f"Top-1: **{top_label}** ({top_conf:.1f}%)")
+
+                # Full table
                 st.dataframe(df, use_container_width=True)
 
-                # бар-чарт
-                if "class" in df and "confidence" in df:
-                    chart = (
-                        alt.Chart(df)
-                        .mark_bar()
-                        .encode(
-                            x=alt.X("class:N", sort="-y", title="Class"),
-                            y=alt.Y("confidence:Q", title="Confidence"),
-                            tooltip=["class", alt.Tooltip("confidence", format=".2f")]
-                        )
-                        .properties(height=300)
+                # ----- Robust Altair chart (avoids readonly-property error) -----
+                if "class" in df and "confidence_%" in df:
+                    chart_df = df[["class", "confidence_%"]].copy()
+                    # Cast to plain Python types
+                    chart_df["class"] = chart_df["class"].astype(str)
+                    chart_df["confidence_%"] = chart_df["confidence_%"].astype(float)
+                    values = chart_df.to_dict(orient="records")
+                    auto_height = max(220, 45 * len(values))
+
+                    base = alt.Chart(alt.Data(values=values)).encode(
+                        y=alt.Y("class:N", sort="-x", title="Class"),
+                        x=alt.X(
+                            "confidence_%:Q",
+                            title="Confidence (%)",
+                            scale=alt.Scale(domain=[0, 100])
+                        ),
+                        tooltip=[
+                            alt.Tooltip("class:N", title="Class"),
+                            alt.Tooltip("confidence_%:Q", title="Confidence (%)", format=".1f")
+                        ],
                     )
-                    st.altair_chart(chart, use_container_width=True)
+
+                    bars = base.mark_bar(
+                        cornerRadiusTopRight=6,
+                        cornerRadiusBottomRight=6,
+                        opacity=0.9
+                    )
+
+                    labels = base.mark_text(
+                        align="left",
+                        dx=5,
+                        fontWeight="bold"
+                    ).encode(text=alt.Text("confidence_%:Q", format=".1f"))
+
+                    layered = (bars + labels).properties(
+                        height=auto_height
+                    ).configure_axis(
+                        grid=True,
+                        gridOpacity=0.15,
+                        labelFontSize=12,
+                        titleFontSize=13
+                    ).configure_view(
+                        strokeOpacity=0
+                    )
+
+                    st.altair_chart(layered, use_container_width=True)
+                # ----------------------------------------------------------------
 
             with st.expander("Raw JSON"):
                 st.code(json.dumps(result, indent=2), language="json")
