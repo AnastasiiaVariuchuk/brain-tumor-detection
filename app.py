@@ -10,6 +10,14 @@ import altair as alt
 from roboflow import Roboflow
 import supervision as sv
 
+def get_roboflow_api_key() -> str:
+    for k in ("ROBOFLOW_API_KEY", "roboflow_api_key"):
+        if k in st.secrets:
+            return st.secrets[k]
+    if os.getenv("ROBOFLOW_API_KEY"):
+        return os.getenv("ROBOFLOW_API_KEY")
+    return st.text_input("Enter Roboflow API key", type="password", help="Not found in st.secrets or env. Enter manually for this session.")
+
 # ---------------- UI ----------------
 st.set_page_config(page_title="Brain Tumor App (Detection & Classification)", layout="centered")
 st.title("🧠 Brain Tumor App — Detection & Classification")
@@ -41,14 +49,6 @@ with st.sidebar:
 uploaded = st.file_uploader("📤 Upload image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
 # ---------------- Helpers ----------------
-def get_roboflow_api_key() -> str:
-    for k in ("ROBOFLOW_API_KEY", "roboflow_api_key"):
-        if k in st.secrets:
-            return st.secrets[k]
-    if os.getenv("ROBOFLOW_API_KEY"):
-        return os.getenv("ROBOFLOW_API_KEY")
-    return st.text_input("Enter Roboflow API key", type="password", help="Not found in st.secrets or env. Enter manually for this session.")
-
 def load_image_to_rgb(file) -> np.ndarray:
     """Read uploaded image -> RGB numpy array with EXIF orientation fix."""
     img = ImageOps.exif_transpose(Image.open(file)).convert("RGB")
