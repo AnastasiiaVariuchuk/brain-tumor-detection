@@ -16,7 +16,12 @@ st.title("🧠 Brain Tumor App — Detection & Classification")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    api_key = st.secrets["ROBOFLOW_API_KEY"]
+    if "ROBOFLOW_API_KEY" in st.secrets:
+        api_key = st.secrets["ROBOFLOW_API_KEY"]
+    else:
+        st.error("❌ ROBOFLOW_API_KEY не знайдено! Додай його у .streamlit/secrets.toml або в Secrets Cloud.")
+        st.stop()
+
     workspace = ""  # empty => default workspace from API key
 
     task = st.radio("Task", ["Detection", "Classification"], horizontal=True)
