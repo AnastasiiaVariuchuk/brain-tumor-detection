@@ -16,10 +16,8 @@ st.title("🧠 Brain Tumor App — Detection & Classification")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    if "ROBOFLOW_API_KEY" in st.secrets:
-        api_key = st.secrets["ROBOFLOW_API_KEY"]
-    else:
-        st.error("❌ ROBOFLOW_API_KEY не знайдено! Додай його у .streamlit/secrets.toml або в Secrets Cloud.")
+    api_key = get_roboflow_api_key()
+    if not api_key:
         st.stop()
 
     workspace = ""  # empty => default workspace from API key
@@ -43,6 +41,14 @@ with st.sidebar:
 uploaded = st.file_uploader("📤 Upload image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
 # ---------------- Helpers ----------------
+def get_roboflow_api_key() -> str:
+    for k in ("ROBOFLOW_API_KEY", "roboflow_api_key"):
+        if k in st.secrets:
+            return st.secrets[k]
+    if os.getenv("ROBOFLOW_API_KEY"):
+        return os.getenv("ROBOFLOW_API_KEY")
+    return st.text_input("Enter Roboflow API key", type="password", help="Not found in st.secrets or env. Enter manually for this session.")
+
 def load_image_to_rgb(file) -> np.ndarray:
     """Read uploaded image -> RGB numpy array with EXIF orientation fix."""
     img = ImageOps.exif_transpose(Image.open(file)).convert("RGB")
