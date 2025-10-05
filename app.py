@@ -16,8 +16,7 @@ st.title("🧠 Brain Tumor App — Detection & Classification")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    api_key = "162uSH7JuhRNxACBn73k"
-    #api_key = st.secrets["ROBOFLOW_API_KEY"]
+    api_key = st.secrets["ROBOFLOW_API_KEY"]
     workspace = ""  # empty => default workspace from API key
 
     task = st.radio("Task", ["Detection", "Classification"], horizontal=True)
