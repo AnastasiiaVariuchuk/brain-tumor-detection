@@ -159,11 +159,14 @@ if uploaded and api_key:
             preds.sort(key=lambda p: p.get("confidence", 0.0), reverse=True)
             preds = preds[:keep_k] if keep_k > 0 else preds
 
-            # 🔹 Shift all boxes right down
-            shift_x, shift_y = 70, 60
+            # 🔹 Shift all boxes right down and enlarge them
+            shift_x, shift_y = 70, 70
+            extra = 10.0  # enlarge each bounding box by +10 px
             for p in preds:
                 p["x"] = float(p["x"]) + shift_x
                 p["y"] = float(p["y"]) + shift_y
+                p["width"]  = float(p["width"])  + extra
+                p["height"] = float(p["height"]) + extra
 
             # Convert to detections in the space of the image we draw on
             detections, _ = preds_to_detections(preds, img_w, img_h)
