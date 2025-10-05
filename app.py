@@ -159,8 +159,8 @@ if uploaded and api_key:
             preds.sort(key=lambda p: p.get("confidence", 0.0), reverse=True)
             preds = preds[:keep_k] if keep_k > 0 else preds
 
-            # 🔹 Shift all boxes by +40 px right and +40 px down
-            shift_x, shift_y = 60, 60
+            # 🔹 Shift all boxes right down
+            shift_x, shift_y = 70, 60
             for p in preds:
                 p["x"] = float(p["x"]) + shift_x
                 p["y"] = float(p["y"]) + shift_y
