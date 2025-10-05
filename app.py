@@ -160,7 +160,7 @@ if uploaded and api_key:
             preds = preds[:keep_k] if keep_k > 0 else preds
 
             # 🔹 Shift all boxes by +40 px right and +40 px down
-            shift_x, shift_y = 40, 40
+            shift_x, shift_y = 60, 60
             for p in preds:
                 p["x"] = float(p["x"]) + shift_x
                 p["y"] = float(p["y"]) + shift_y
