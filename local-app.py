@@ -159,12 +159,6 @@ if uploaded and api_key:
             preds.sort(key=lambda p: p.get("confidence", 0.0), reverse=True)
             preds = preds[:keep_k] if keep_k > 0 else preds
 
-            # 🔹 Shift all boxes by +40 px right and +40 px down
-            shift_x, shift_y = 40, 40
-            for p in preds:
-                p["x"] = float(p["x"]) + shift_x
-                p["y"] = float(p["y"]) + shift_y
-
             # Convert to detections in the space of the image we draw on
             detections, _ = preds_to_detections(preds, img_w, img_h)
             classes = sorted(set(p.get("class", "object") for p in preds))
